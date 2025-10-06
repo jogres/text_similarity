@@ -1,0 +1,14 @@
+{
+    "name": "text-similarity/pdf-extractor",
+    "description": "Sistema de análise de similaridade de textos com extração de PDF",
+    "type": "project",
+    "require": {
+        "php": ">=7.4",
+        "smalot/pdfparser": "^2.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "TextSimilarity\\": "src/"
+        }
+    }
+}
