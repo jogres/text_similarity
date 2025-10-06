@@ -158,6 +158,10 @@ require_once 'functions/similarity.php';
                         <span class="btn-text">Análise Avançada</span>
                         <span class="btn-icon">🔍</span>
                     </a>
+                    <a href="admin/dashboard.php" class="btn-advanced" style="margin-left: 8px;">
+                        <span class="btn-text">Dashboard</span>
+                        <span class="btn-icon">📈</span>
+                    </a>
                 </div>
             </form>
 
@@ -181,7 +185,7 @@ require_once 'functions/similarity.php';
         </main>
 
         <footer class="footer">
-            <p>&copy; 2024 Sistema de Comparação de Textos - Desenvolvido para TCC</p>
+            <p>&copy; 2025 Sistema de Comparação de Textos - Desenvolvido por <a href="https://github.com/jogres/text_similarity" target="_blank">Wesley da Rocha Silva</a> para TCC</p>
         </footer>
     </div>
 

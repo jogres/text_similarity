@@ -81,6 +81,11 @@ $systemLimits = $performance->checkSystemLimits();
         <div class="header">
             <h1>📊 Dashboard do Sistema</h1>
             <p>Monitoramento em tempo real do sistema de análise de textos</p>
+            <div style="margin-top: 12px;">
+                <a href="../index.php" class="btn" style="margin-right:6px;">🏠 Início</a>
+                <a href="../advanced_analysis.php" class="btn" style="margin-right:6px;">🔍 Análise Avançada</a>
+                <a href="../index.php#compare" class="btn">📊 Comparar Textos</a>
+            </div>
         </div>
 
         <!-- Estatísticas Gerais -->
