@@ -18,15 +18,37 @@ function checkPlagiarismOnline($text, $options = []) {
         'searchDepth' => 'standard',
         'language' => 'pt',
         'similarityThreshold' => 0.7,
-        'maxResults' => 10
+        'maxResults' => 10,
+        'maxSentencesToCheck' => 10 // LIMITE: Máximo de frases a verificar
     ];
     $options = array_merge($defaultOptions, $options);
+    
     // Extrair frases significativas do texto
     $sentences = extractSignificantSentences($text);
+    
+    // CORREÇÃO DO LOOP INFINITO: Limitar número de frases a verificar
+    $maxSentences = $options['maxSentencesToCheck'];
+    if (count($sentences) > $maxSentences) {
+        // Selecionar frases mais importantes (primeiras e últimas)
+        $firstPart = array_slice($sentences, 0, intval($maxSentences / 2));
+        $lastPart = array_slice($sentences, -intval($maxSentences / 2));
+        $sentences = array_merge($firstPart, $lastPart);
+    }
+    
     $plagiarismResults = [];
+    $checkedSentences = 0; // Contador de segurança
+    
     foreach ($sentences as $sentence) {
+        // PROTEÇÃO: Parar se já verificou número máximo
+        if ($checkedSentences >= $maxSentences) {
+            break;
+        }
+        
         if (strlen(trim($sentence)) < 20) continue; // Ignorar frases muito curtas
+        
         $searchResults = searchTextOnline($sentence, $options);
+        $checkedSentences++; // Incrementar contador
+        
         if (!empty($searchResults)) {
             foreach ($searchResults as $result) {
                 $similarity = calculateTextSimilarity($sentence, $result['content']);
@@ -42,7 +64,17 @@ function checkPlagiarismOnline($text, $options = []) {
                 }
             }
         }
+        
+        // PROTEÇÃO: Timeout de segurança (se levar mais de 60 segundos, parar)
+        static $startTime = null;
+        if ($startTime === null) {
+            $startTime = microtime(true);
+        }
+        if ((microtime(true) - $startTime) > 60) { // 60 segundos máximo
+            break;
+        }
     }
+    
     // Calcular score geral de plágio
     $plagiarismScore = calculatePlagiarismScore($plagiarismResults);
     return [
@@ -50,7 +82,9 @@ function checkPlagiarismOnline($text, $options = []) {
         'plagiarism_score' => $plagiarismScore,
         'matches_found' => count($plagiarismResults),
         'matches' => $plagiarismResults,
-        'analysis_summary' => generatePlagiarismSummary($plagiarismResults, $plagiarismScore)
+        'analysis_summary' => generatePlagiarismSummary($plagiarismResults, $plagiarismScore),
+        'sentences_checked' => $checkedSentences,
+        'total_sentences' => count(extractSignificantSentences($text))
     ];
 }
 /**
@@ -86,23 +120,420 @@ function extractSignificantSentences($text) {
  */
 function searchTextOnline($query, $options) {
     $results = [];
-    // Simular busca online (em implementação real, usar APIs como Google Custom Search, Bing, etc.)
-    $mockResults = [
-        [
-            'title' => 'Resultado de Busca 1',
-            'content' => 'Conteúdo similar encontrado online...',
-            'url' => 'https://exemplo.com/artigo1'
-        ],
-        [
-            'title' => 'Resultado de Busca 2', 
-            'content' => 'Outro conteúdo relacionado...',
-            'url' => 'https://exemplo.com/artigo2'
-        ]
-    ];
-    // Em implementação real, fazer chamadas para APIs de busca
-    // $results = callSearchAPI($query, $options);
-    return $mockResults;
+    
+    // Limpar query para busca
+    $cleanQuery = trim($query);
+    if (strlen($cleanQuery) < 20) {
+        return []; // Query muito curta
+    }
+    
+    // Limitar tamanho da query para APIs
+    if (strlen($cleanQuery) > 200) {
+        $cleanQuery = substr($cleanQuery, 0, 200);
+    }
+    
+    // Tentar múltiplas fontes de busca
+    $searchDepth = $options['searchDepth'] ?? 'standard';
+    $maxResults = ($searchDepth === 'deep') ? 10 : (($searchDepth === 'basic') ? 3 : 5);
+    
+    // 1. Tentar Google Custom Search API (se configurada)
+    $googleResults = searchWithGoogleCustomSearch($cleanQuery, $maxResults);
+    if (!empty($googleResults)) {
+        $results = array_merge($results, $googleResults);
+    }
+    
+    // 2. Tentar Bing Search API (se configurada)
+    if (count($results) < $maxResults) {
+        $bingResults = searchWithBingAPI($cleanQuery, $maxResults - count($results));
+        if (!empty($bingResults)) {
+            $results = array_merge($results, $bingResults);
+        }
+    }
+    
+    // 3. Fallback: DuckDuckGo HTML parsing (sem API key necessária)
+    if (empty($results)) {
+        $duckResults = searchWithDuckDuckGo($cleanQuery, $maxResults);
+        if (!empty($duckResults)) {
+            $results = array_merge($results, $duckResults);
+        }
+    }
+    
+    // 4. Último fallback: Busca acadêmica (Google Scholar scraping leve)
+    if (empty($results) && $searchDepth !== 'basic') {
+        $scholarResults = searchGoogleScholar($cleanQuery, 3);
+        if (!empty($scholarResults)) {
+            $results = array_merge($results, $scholarResults);
+        }
+    }
+    
+    return array_slice($results, 0, $maxResults);
 }
+
+/**
+ * Busca usando Google Custom Search API
+ * 
+ * @param string $query Query de busca
+ * @param int $maxResults Número máximo de resultados
+ * @return array Resultados encontrados
+ */
+function searchWithGoogleCustomSearch($query, $maxResults = 5) {
+    // Verificar se API key e CX estão configurados
+    $apiKey = getenv('GOOGLE_API_KEY') ?: '';
+    $cx = getenv('GOOGLE_CX') ?: '';
+    
+    if (empty($apiKey) || empty($cx)) {
+        return []; // API não configurada
+    }
+    
+    $results = [];
+    $encodedQuery = urlencode($query);
+    $url = "https://www.googleapis.com/customsearch/v1?key={$apiKey}&cx={$cx}&q={$encodedQuery}&num={$maxResults}";
+    
+    try {
+        $response = @file_get_contents($url, false, stream_context_create([
+            'http' => [
+                'timeout' => 10,
+                'ignore_errors' => true
+            ]
+        ]));
+        
+        if ($response === false) {
+            return [];
+        }
+        
+        $data = json_decode($response, true);
+        
+        if (isset($data['items']) && is_array($data['items'])) {
+            foreach ($data['items'] as $item) {
+                $content = fetchContentFromUrl($item['link']);
+                $results[] = [
+                    'title' => $item['title'] ?? 'Sem título',
+                    'content' => $content ?: ($item['snippet'] ?? ''),
+                    'url' => $item['link'] ?? '',
+                    'source' => 'Google'
+                ];
+            }
+        }
+    } catch (Exception $e) {
+        error_log("Erro na busca Google: " . $e->getMessage());
+    }
+    
+    return $results;
+}
+
+/**
+ * Busca usando Bing Search API
+ * 
+ * @param string $query Query de busca
+ * @param int $maxResults Número máximo de resultados
+ * @return array Resultados encontrados
+ */
+function searchWithBingAPI($query, $maxResults = 5) {
+    $apiKey = getenv('BING_API_KEY') ?: '';
+    
+    if (empty($apiKey)) {
+        return [];
+    }
+    
+    $results = [];
+    $encodedQuery = urlencode($query);
+    $url = "https://api.bing.microsoft.com/v7.0/search?q={$encodedQuery}&count={$maxResults}";
+    
+    try {
+        $context = stream_context_create([
+            'http' => [
+                'header' => "Ocp-Apim-Subscription-Key: {$apiKey}\r\n",
+                'timeout' => 10,
+                'ignore_errors' => true
+            ]
+        ]);
+        
+        $response = @file_get_contents($url, false, $context);
+        
+        if ($response === false) {
+            return [];
+        }
+        
+        $data = json_decode($response, true);
+        
+        if (isset($data['webPages']['value']) && is_array($data['webPages']['value'])) {
+            foreach ($data['webPages']['value'] as $item) {
+                $content = fetchContentFromUrl($item['url']);
+                $results[] = [
+                    'title' => $item['name'] ?? 'Sem título',
+                    'content' => $content ?: ($item['snippet'] ?? ''),
+                    'url' => $item['url'] ?? '',
+                    'source' => 'Bing'
+                ];
+            }
+        }
+    } catch (Exception $e) {
+        error_log("Erro na busca Bing: " . $e->getMessage());
+    }
+    
+    return $results;
+}
+
+/**
+ * Busca usando DuckDuckGo (HTML scraping)
+ * 
+ * @param string $query Query de busca
+ * @param int $maxResults Número máximo de resultados
+ * @return array Resultados encontrados
+ */
+function searchWithDuckDuckGo($query, $maxResults = 5) {
+    $results = [];
+    $encodedQuery = urlencode($query);
+    $url = "https://html.duckduckgo.com/html/?q={$encodedQuery}";
+    
+    try {
+        $context = stream_context_create([
+            'http' => [
+                'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n",
+                'timeout' => 10,
+                'ignore_errors' => true
+            ]
+        ]);
+        
+        $html = @file_get_contents($url, false, $context);
+        
+        if ($html === false) {
+            return [];
+        }
+        
+        // Parse HTML simples para extrair resultados
+        preg_match_all('/<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/i', $html, $matches, PREG_SET_ORDER);
+        
+        $count = 0;
+        foreach ($matches as $match) {
+            if ($count >= $maxResults) break;
+            
+            $resultUrl = html_entity_decode($match[1]);
+            $title = html_entity_decode(strip_tags($match[2]));
+            
+            // Normalizar URL do DuckDuckGo
+            if (strpos($resultUrl, '//') === 0) {
+                $resultUrl = 'https:' . $resultUrl;
+            }
+            
+            // Se for URL de redirecionamento do DuckDuckGo, extrair URL real
+            if (strpos($resultUrl, 'duckduckgo.com/l/') !== false) {
+                parse_str(parse_url($resultUrl, PHP_URL_QUERY), $params);
+                if (isset($params['uddg'])) {
+                    $resultUrl = urldecode($params['uddg']);
+                }
+            }
+            
+            // Validar URL
+            if (!filter_var($resultUrl, FILTER_VALIDATE_URL)) {
+                continue;
+            }
+            
+            // Extrair snippet se possível
+            $snippet = '';
+            if (preg_match('/<a[^>]+class="result__snippet"[^>]*>([^<]+)<\/a>/i', $html, $snippetMatch)) {
+                $snippet = html_entity_decode(strip_tags($snippetMatch[1]));
+            }
+            
+            $content = fetchContentFromUrl($resultUrl);
+            
+            $results[] = [
+                'title' => $title,
+                'content' => $content ?: $snippet,
+                'url' => $resultUrl,
+                'source' => 'DuckDuckGo'
+            ];
+            
+            $count++;
+        }
+    } catch (Exception $e) {
+        error_log("Erro na busca DuckDuckGo: " . $e->getMessage());
+    }
+    
+    return $results;
+}
+
+/**
+ * Busca no Google Scholar (scraping leve)
+ * 
+ * @param string $query Query de busca
+ * @param int $maxResults Número máximo de resultados
+ * @return array Resultados encontrados
+ */
+function searchGoogleScholar($query, $maxResults = 3) {
+    $results = [];
+    $encodedQuery = urlencode($query);
+    $url = "https://scholar.google.com/scholar?q={$encodedQuery}&hl=pt-BR";
+    
+    try {
+        $context = stream_context_create([
+            'http' => [
+                'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n",
+                'timeout' => 10,
+                'ignore_errors' => true
+            ]
+        ]);
+        
+        $html = @file_get_contents($url, false, $context);
+        
+        if ($html === false) {
+            return [];
+        }
+        
+        // Parse básico de resultados do Scholar
+        preg_match_all('/<h3[^>]+class="gs_rt"[^>]*><a[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/i', $html, $matches, PREG_SET_ORDER);
+        
+        $count = 0;
+        foreach ($matches as $match) {
+            if ($count >= $maxResults) break;
+            
+            $resultUrl = html_entity_decode($match[1]);
+            $title = html_entity_decode(strip_tags($match[2]));
+            
+            $content = fetchContentFromUrl($resultUrl);
+            
+            $results[] = [
+                'title' => $title,
+                'content' => $content ?: '',
+                'url' => $resultUrl,
+                'source' => 'Google Scholar'
+            ];
+            
+            $count++;
+        }
+    } catch (Exception $e) {
+        error_log("Erro na busca Google Scholar: " . $e->getMessage());
+    }
+    
+    return $results;
+}
+
+/**
+ * Busca conteúdo de uma URL
+ * 
+ * @param string $url URL para buscar
+ * @return string Conteúdo extraído
+ */
+function fetchContentFromUrl($url) {
+    // CACHE estático para evitar buscar mesma URL múltiplas vezes
+    static $urlCache = [];
+    static $fetchCount = 0;
+    
+    // PROTEÇÃO: Limitar número total de requisições HTTP por execução
+    if ($fetchCount >= 20) { // Máximo 20 requisições HTTP
+        return '';
+    }
+    
+    // Verificar cache primeiro
+    if (isset($urlCache[$url])) {
+        return $urlCache[$url];
+    }
+    
+    // Validar URL
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+        return '';
+    }
+    
+    // URLs a evitar
+    $blockedDomains = ['facebook.com', 'twitter.com', 'instagram.com', 'linkedin.com'];
+    foreach ($blockedDomains as $domain) {
+        if (strpos($url, $domain) !== false) {
+            return ''; // Redes sociais geralmente bloqueiam scraping
+        }
+    }
+    
+    $fetchCount++; // Incrementar contador de requisições
+    
+    // Usar cURL se disponível (mais robusto que file_get_contents)
+    if (function_exists('curl_init')) {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 2, // Reduzido de 3 para 2
+            CURLOPT_TIMEOUT => 5, // Reduzido de 8 para 5 segundos
+            CURLOPT_CONNECTTIMEOUT => 3, // Timeout de conexão
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_ENCODING => 'gzip, deflate'
+        ]);
+        
+        $html = @curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        
+        if ($html === false || $httpCode >= 400) {
+            $urlCache[$url] = ''; // Cachear resultado vazio
+            return '';
+        }
+    } else {
+        // Fallback para file_get_contents
+        $context = stream_context_create([
+            'http' => [
+                'header' => "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\nAccept: text/html,application/xhtml+xml\r\n",
+                'timeout' => 5, // Reduzido de 8 para 5 segundos
+                'ignore_errors' => true,
+                'follow_location' => true,
+                'max_redirects' => 2 // Reduzido de 3 para 2
+            ],
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false
+            ]
+        ]);
+        
+        $html = @file_get_contents($url, false, $context);
+        
+        if ($html === false) {
+            $urlCache[$url] = ''; // Cachear resultado vazio
+            return '';
+        }
+    }
+    
+    // Remover scripts, styles e outros elementos não textuais
+    $html = preg_replace('/<script\b[^>]*>.*?<\/script>/is', '', $html);
+    $html = preg_replace('/<style\b[^>]*>.*?<\/style>/is', '', $html);
+    $html = preg_replace('/<nav\b[^>]*>.*?<\/nav>/is', '', $html);
+    $html = preg_replace('/<footer\b[^>]*>.*?<\/footer>/is', '', $html);
+    $html = preg_replace('/<header\b[^>]*>.*?<\/header>/is', '', $html);
+    
+    // Tentar extrair conteúdo principal (article, main, content)
+    $mainContent = '';
+    if (preg_match('/<article[^>]*>(.*?)<\/article>/is', $html, $matches)) {
+        $mainContent = $matches[1];
+    } elseif (preg_match('/<main[^>]*>(.*?)<\/main>/is', $html, $matches)) {
+        $mainContent = $matches[1];
+    } elseif (preg_match('/<div[^>]*class="[^"]*content[^"]*"[^>]*>(.*?)<\/div>/is', $html, $matches)) {
+        $mainContent = $matches[1];
+    }
+    
+    // Se não encontrou conteúdo principal, usar todo o HTML
+    $textSource = $mainContent ?: $html;
+    
+    // Extrair texto
+    $text = strip_tags($textSource);
+    $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $text = preg_replace('/\s+/', ' ', $text);
+    $text = trim($text);
+    
+    // Limitar tamanho mas tentar pegar parágrafos completos
+    if (strlen($text) > 3000) {
+        $text = substr($text, 0, 3000);
+        // Cortar no último ponto completo
+        $lastPeriod = strrpos($text, '.');
+        if ($lastPeriod !== false && $lastPeriod > 2000) {
+            $text = substr($text, 0, $lastPeriod + 1);
+        }
+    }
+    
+    // Salvar no cache antes de retornar
+    $urlCache[$url] = $text;
+    
+    return $text;
+}
+
 /**
  * Calcula similaridade entre dois textos
  * 
